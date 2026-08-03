@@ -20,6 +20,12 @@ output/
 # ---- 外部執行檔：體積龐大，且 FFmpeg 為 GPL 授權，轉散布有義務 ----
 bin/
 
+# ---- 本機偏好設定（含輸出路徑，因人而異）----
+settings.json
+
+# ---- 個人待辦與檢討筆記，不對外 ----
+wait.txt
+
 # ---- Python ----
 __pycache__/
 *.py[cod]
