@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import shutil
 import subprocess
@@ -28,6 +29,25 @@ VERTICAL_ANCHORS: dict[str, str] = {
     "置中": "center",
     "靠左": "left",
     "靠右": "right",
+}
+
+# 硬體編碼器。auto 會依序挑第一個實際可用的，全都不行就退回 CPU。
+ENCODERS: dict[str, str] = {
+    "自動（優先硬體加速）": "auto",
+    "CPU (libx264)": "cpu",
+    "NVIDIA (NVENC)": "nvenc",
+    "Intel (QSV)": "qsv",
+    "AMD (AMF)": "amf",
+}
+
+# 偏好順序：品質與相容性折衷後的經驗排序
+HW_PREFERENCE = ("nvenc", "qsv", "amf")
+
+ENCODER_CODECS: dict[str, str] = {
+    "cpu": "libx264",
+    "nvenc": "h264_nvenc",
+    "qsv": "h264_qsv",
+    "amf": "h264_amf",
 }
 
 # Windows 下用 CREATE_NO_WINDOW 避免每次呼叫 ffmpeg 都閃出黑色視窗
@@ -64,6 +84,10 @@ class ClipSettings:
     vertical_anchor: str = "center"  # center / left / right
 
     keep_original: bool = True
+
+    # 編碼設定
+    encoder: str = "auto"
+    quality: int = 18  # CPU 是 CRF，硬體編碼器換算成各自的品質參數
 
     @property
     def needs_processing(self) -> bool:
@@ -145,3 +169,40 @@ def find_ffmpeg() -> str | None:
 
 def find_ffprobe() -> str | None:
     return _find_tool("ffprobe")
+
+
+@functools.lru_cache(maxsize=1)
+def available_encoders() -> tuple[str, ...]:
+    """問 FFmpeg 有哪些硬體編碼器可用。
+
+    只看它「有沒有編進去」，不代表這台機器的顯卡真的支援——
+    實際能不能跑要等編碼失敗才知道，所以 processor 那邊還有一層退回機制。
+    """
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        return ("cpu",)
+    try:
+        out = subprocess.run(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
+        ).stdout
+    except Exception:
+        return ("cpu",)
+
+    found = [name for name in HW_PREFERENCE if ENCODER_CODECS[name] in out]
+    return tuple(found) + ("cpu",)
+
+
+def resolve_encoder(choice: str, exclude: set[str] | None = None) -> str:
+    """把使用者的選擇換算成實際要用的編碼器代號。
+
+    exclude 用來排除本次執行已經證實跑不動的編碼器。
+    """
+    blocked = exclude or set()
+    usable = [e for e in available_encoders() if e not in blocked]
+    if not usable:
+        return "cpu"
+    if choice == "auto":
+        return usable[0]
+    return choice if choice in usable else "cpu"

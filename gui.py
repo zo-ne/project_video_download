@@ -20,10 +20,12 @@ from config import (
     Cancelled,
     ClipSettings,
     DownloadSettings,
+    ENCODERS,
     OUTPUT_DIR,
     SUPPORTED_BROWSERS,
     VERTICAL_ANCHORS,
     VERTICAL_RATIOS,
+    available_encoders,
     find_ffmpeg,
 )
 from downloader import Downloader
@@ -80,6 +82,9 @@ class App:
         self.var_blur_w = IntVar(value=240)
         self.var_blur_h = IntVar(value=80)
         self.var_blur_strength = IntVar(value=12)
+
+        self.var_encoder = StringVar(value=next(iter(ENCODERS)))
+        self.var_quality = IntVar(value=18)
 
         self.var_status = StringVar(value="就緒")
         self.var_overall = StringVar(value="")
@@ -229,6 +234,27 @@ class App:
             text="來源本來就是直式（比目標更窄）時會原樣輸出，不會二次裁切。",
             foreground="#666",
         ).pack(anchor="w", pady=(4, 0))
+
+        ttk.Separator(frame, orient="horizontal").pack(fill="x", pady=8)
+
+        # --- 編碼設定 ---
+        row = ttk.Frame(frame)
+        row.pack(fill="x")
+        ttk.Label(row, text="編碼器").pack(side="left", padx=(0, 4))
+        self.cmb_encoder = ttk.Combobox(
+            row, textvariable=self.var_encoder, values=list(ENCODERS),
+            state="readonly", width=20,
+        )
+        self.cmb_encoder.pack(side="left")
+
+        ttk.Label(row, text="品質").pack(side="left", padx=(12, 4))
+        ttk.Spinbox(row, from_=0, to=51, textvariable=self.var_quality, width=5).pack(
+            side="left"
+        )
+        ttk.Label(
+            row, text="（數字越小畫質越好、檔案越大；18 接近視覺無損）",
+            foreground="#666",
+        ).pack(side="left", padx=(8, 0))
 
     def _spin_row(self, parent: ttk.Frame, specs, limit: int) -> list[ttk.Spinbox]:
         widgets = []
@@ -412,6 +438,8 @@ class App:
                 vertical_ratio=self.var_vertical_ratio.get(),
                 vertical_anchor=VERTICAL_ANCHORS[self.var_vertical_anchor.get()],
                 keep_original=self.var_keep_original.get(),
+                encoder=ENCODERS[self.var_encoder.get()],
+                quality=self.var_quality.get(),
             )
         except Exception:
             messagebox.showerror("參數錯誤", "剪輯參數必須是整數。")
@@ -534,6 +562,14 @@ class App:
             self._append_log(
                 "警告：找不到 deno，YouTube 部分高畫質格式可能取不到。", "warn"
             )
+
+        encoders = available_encoders()
+        hw = [e for e in encoders if e != "cpu"]
+        self._append_log(
+            f"可用編碼器：{'、'.join(encoders)}"
+            + ("" if hw else "（未偵測到硬體加速，將使用 CPU）"),
+            "info",
+        )
 
         self._append_log(f"輸出資料夾：{self.var_outdir.get()}", "info")
 

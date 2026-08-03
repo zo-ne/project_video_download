@@ -11,14 +11,21 @@ from typing import Callable
 from config import (
     Cancelled,
     ClipSettings,
+    ENCODER_CODECS,
     NO_WINDOW,
     VERTICAL_RATIOS,
     find_ffmpeg,
     find_ffprobe,
+    resolve_encoder,
 )
 
 LogFn = Callable[[str, str], None]
 ProgressFn = Callable[[float, str], None]
+
+# FFmpeg 有把某個硬體編碼器編進去，不代表這台機器的驅動跑得動
+# （例如顯卡驅動版本太舊）。第一次實際失敗後就記住，批次處理時
+# 不必每個檔案都再浪費一次嘗試。
+_broken_encoders: set[str] = set()
 
 
 def build_filter(s: ClipSettings) -> str:
@@ -114,43 +121,27 @@ def probe_duration(path: Path) -> float:
         return 0.0
 
 
-def process(
-    src: Path,
-    settings: ClipSettings,
-    log: LogFn,
+def build_video_args(encoder: str, quality: int) -> list[str]:
+    """各編碼器的品質參數名稱不同，這裡統一從一個 0-51 的數值換算。"""
+    q = max(0, min(51, quality))
+    if encoder == "nvenc":
+        return ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", str(q)]
+    if encoder == "qsv":
+        return ["-c:v", "h264_qsv", "-global_quality", str(q)]
+    if encoder == "amf":
+        return ["-c:v", "h264_amf", "-rc", "cqp", "-qp_i", str(q), "-qp_p", str(q)]
+    # CPU 才明確指定 pix_fmt；硬體編碼器有自己偏好的格式，交給它決定
+    return ["-c:v", "libx264", "-crf", str(q), "-preset", "veryfast",
+            "-pix_fmt", "yuv420p"]
+
+
+def _run_ffmpeg(
+    cmd: list[str],
+    duration: float,
     progress: ProgressFn,
     cancel_event: threading.Event,
-) -> Path:
-    """對 src 執行剪輯，回傳最終檔案路徑。
-
-    keep_original=True 時輸出 `<原檔名>_edited.mp4`，否則就地取代原檔。
-    """
-    ffmpeg = find_ffmpeg()
-    if not ffmpeg:
-        raise RuntimeError("找不到 ffmpeg，請安裝並加入 PATH，或放到專案的 bin/ 目錄。")
-
-    tmp = src.with_name(f"{src.stem}.processing.mp4")
-    final = (
-        src.with_name(f"{src.stem}_edited.mp4") if settings.keep_original else src
-    )
-
-    duration = probe_duration(src)
-    vf = build_filter(settings)
-
-    cmd = [
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-        "-i", str(src),
-        "-filter_complex", vf,
-        "-map", "[v]", "-map", "0:a?",
-        "-c:v", "libx264", "-crf", "18", "-preset", "veryfast",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "copy",
-        "-movflags", "+faststart",
-        "-progress", "pipe:1", "-nostats",
-        str(tmp),
-    ]
-
-    log(f"FFmpeg 濾鏡：{vf}", "info")
+) -> tuple[int, str]:
+    """跑一次 FFmpeg 並回報進度，回傳 (return code, stderr)。"""
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -160,7 +151,6 @@ def process(
         errors="replace",
         creationflags=NO_WINDOW,
     )
-
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -175,11 +165,69 @@ def process(
                     progress(pct, f"剪輯中 {pct:5.1f}%")
             elif line == "progress=end":
                 progress(100.0, "剪輯完成")
-
         proc.wait()
-        if proc.returncode != 0:
-            stderr = (proc.stderr.read() if proc.stderr else "").strip()
-            raise RuntimeError(f"FFmpeg 失敗 (code {proc.returncode})：{stderr[:500]}")
+        stderr = (proc.stderr.read() if proc.stderr else "").strip()
+        return proc.returncode, stderr
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+
+
+def process(
+    src: Path,
+    settings: ClipSettings,
+    log: LogFn,
+    progress: ProgressFn,
+    cancel_event: threading.Event,
+) -> Path:
+    """對 src 執行剪輯，回傳最終檔案路徑。
+
+    keep_original=True 時輸出 `<原檔名>_edited.mp4`，否則就地取代原檔。
+    硬體編碼失敗會自動退回 CPU 再試一次。
+    """
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError("找不到 ffmpeg，請安裝並加入 PATH，或放到專案的 bin/ 目錄。")
+
+    tmp = src.with_name(f"{src.stem}.processing.mp4")
+    final = (
+        src.with_name(f"{src.stem}_edited.mp4") if settings.keep_original else src
+    )
+
+    duration = probe_duration(src)
+    vf = build_filter(settings)
+    log(f"FFmpeg 濾鏡：{vf}", "info")
+
+    encoder = resolve_encoder(settings.encoder, exclude=_broken_encoders)
+    # 「編進 FFmpeg」不等於「這台機器跑得動」，所以硬體編碼保留一次退回機會
+    attempts = [encoder] if encoder == "cpu" else [encoder, "cpu"]
+
+    try:
+        for attempt in attempts:
+            log(f"編碼器：{ENCODER_CODECS[attempt]}", "info")
+            cmd = [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(src),
+                "-filter_complex", vf,
+                "-map", "[v]", "-map", "0:a?",
+                *build_video_args(attempt, settings.quality),
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                "-progress", "pipe:1", "-nostats",
+                str(tmp),
+            ]
+            code, stderr = _run_ffmpeg(cmd, duration, progress, cancel_event)
+            if code == 0:
+                break
+            if attempt is attempts[-1]:
+                raise RuntimeError(f"FFmpeg 失敗 (code {code})：{stderr[:500]}")
+            _broken_encoders.add(attempt)
+            log(
+                f"{ENCODER_CODECS[attempt]} 在這台機器上無法使用，改用 CPU"
+                f"（本次執行不再嘗試）：{stderr[:200]}",
+                "warn",
+            )
+            tmp.unlink(missing_ok=True)
 
         # 成功才覆蓋目標檔，避免中途失敗留下半成品
         if final.exists() and final != src:
@@ -189,6 +237,4 @@ def process(
         tmp.replace(final)
         return final
     finally:
-        if proc.poll() is None:
-            proc.terminate()
         tmp.unlink(missing_ok=True)
