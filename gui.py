@@ -27,6 +27,8 @@ from config import (
     VERTICAL_RATIOS,
     available_encoders,
     find_ffmpeg,
+    load_settings,
+    save_settings,
 )
 from downloader import Downloader
 
@@ -88,6 +90,63 @@ class App:
 
         self.var_status = StringVar(value="就緒")
         self.var_overall = StringVar(value="")
+
+        self._restore_settings()
+
+    # ---------- 設定保存 ----------
+
+    def _setting_vars(self) -> dict:
+        """會被記住的欄位。網址不存，每次開啟應該是空的。"""
+        return {
+            "outdir": self.var_outdir,
+            "cookies": self.var_cookies,
+            "browser": self.var_browser,
+            "clip": self.var_clip,
+            "mode": self.var_mode,
+            "keep_original": self.var_keep_original,
+            "vertical": self.var_vertical,
+            "vertical_ratio": self.var_vertical_ratio,
+            "vertical_anchor": self.var_vertical_anchor,
+            "crop_top": self.var_crop_top,
+            "crop_bottom": self.var_crop_bottom,
+            "crop_left": self.var_crop_left,
+            "crop_right": self.var_crop_right,
+            "blur_x": self.var_blur_x,
+            "blur_y": self.var_blur_y,
+            "blur_w": self.var_blur_w,
+            "blur_h": self.var_blur_h,
+            "blur_strength": self.var_blur_strength,
+            "encoder": self.var_encoder,
+            "quality": self.var_quality,
+        }
+
+    def _restore_settings(self) -> None:
+        data = load_settings()
+        # 下拉選單的選項可能隨版本增減，存進來的舊值要先確認還在清單裡，
+        # 否則之後用它去查字典會 KeyError
+        allowed = {
+            "browser": SUPPORTED_BROWSERS,
+            "mode": ["crop", "blur", "delogo"],
+            "vertical_ratio": list(VERTICAL_RATIOS),
+            "vertical_anchor": list(VERTICAL_ANCHORS),
+            "encoder": list(ENCODERS),
+        }
+        for key, var in self._setting_vars().items():
+            if key not in data:
+                continue
+            value = data[key]
+            if key in allowed and value not in allowed[key]:
+                continue
+            try:
+                var.set(value)
+            except Exception:
+                pass
+
+    def _persist_settings(self) -> None:
+        try:
+            save_settings({k: v.get() for k, v in self._setting_vars().items()})
+        except Exception:
+            pass
 
     # ---------- 介面 ----------
 
@@ -294,8 +353,21 @@ class App:
 
         bar_row = ttk.Frame(parent)
         bar_row.pack(fill="x", pady=(8, 0))
+
+        ttk.Label(bar_row, text="目前步驟", width=8, foreground="#555").grid(
+            row=0, column=0, sticky="w"
+        )
         self.progress = ttk.Progressbar(bar_row, mode="determinate", maximum=100)
-        self.progress.pack(fill="x")
+        self.progress.grid(row=0, column=1, sticky="ew")
+
+        ttk.Label(bar_row, text="整體進度", width=8, foreground="#555").grid(
+            row=1, column=0, sticky="w", pady=(4, 0)
+        )
+        self.progress_all = ttk.Progressbar(bar_row, mode="determinate", maximum=100)
+        self.progress_all.grid(row=1, column=1, sticky="ew", pady=(4, 0))
+
+        bar_row.columnconfigure(1, weight=1)
+
         ttk.Label(parent, textvariable=self.var_status, foreground="#333").pack(
             anchor="w", pady=(4, 0)
         )
@@ -363,8 +435,11 @@ class App:
                     self.var_status.set(text)
                 elif kind == "overall":
                     self.var_overall.set(payload[0])
+                elif kind == "overall_pct":
+                    self.progress_all["value"] = payload[0]
                 elif kind == "done":
                     self._set_running(False)
+                    self.progress_all["value"] = 100 if payload[1] else 0
                     self.var_status.set(payload[0])
                     self.var_overall.set("")
         except queue.Empty:
@@ -467,8 +542,10 @@ class App:
             return
         dl, clip = collected
 
+        self._persist_settings()
         self.cancel_event.clear()
         self._set_running(True)
+        self.progress_all["value"] = 0
         self.var_status.set("準備中…")
         self._append_log(f"開始處理 {len(dl.urls)} 個網址", "ok")
 
@@ -486,15 +563,29 @@ class App:
             if not messagebox.askokcancel("確認關閉", "任務仍在執行中，確定要關閉嗎？"):
                 return
             self.cancel_event.set()
+        self._persist_settings()
         self.root.destroy()
 
     # ---------- 背景任務 ----------
 
     def _run_job(self, dl: DownloadSettings, clip: ClipSettings) -> None:
         log = lambda msg, level="info": self._emit("log", msg, level)
-        progress = lambda pct, text: self._emit("progress", pct, text)
 
         total = len(dl.urls)
+        # 沒開後製時，下載就是該網址的全部工作
+        dl_weight = 0.6 if clip.needs_processing else 1.0
+        state = {"index": 1, "phase": "download"}
+
+        def progress(pct: float, text: str) -> None:
+            """單一步驟的進度，同時換算成整批的加權進度。"""
+            self._emit("progress", pct, text)
+            if state["phase"] == "download":
+                frac = pct / 100 * dl_weight
+            else:
+                frac = dl_weight + pct / 100 * (1 - dl_weight)
+            overall = (state["index"] - 1 + frac) / total * 100
+            self._emit("overall_pct", max(0.0, min(100.0, overall)))
+
         ok_count = 0
         fail_count = 0
 
@@ -503,6 +594,7 @@ class App:
                 if self.cancel_event.is_set():
                     raise Cancelled()
 
+                state["index"], state["phase"] = index, "download"
                 self._emit("overall", f"第 {index} / {total} 個網址")
                 log(f"[{index}/{total}] {url}", "ok")
 
@@ -511,6 +603,7 @@ class App:
                 if not files:
                     log("此網址沒有產生任何檔案。", "warn")
                     fail_count += 1
+                    self._emit("overall_pct", index / total * 100)
                     continue
 
                 for path in files:
@@ -518,6 +611,7 @@ class App:
                     if not clip.needs_processing:
                         ok_count += 1
                         continue
+                    state["phase"] = "process"
                     try:
                         result = processor.process(
                             path, clip, log, progress, self.cancel_event
@@ -530,17 +624,19 @@ class App:
                         log(f"剪輯失敗（保留原始檔）：{exc}", "error")
                         fail_count += 1
 
+                self._emit("overall_pct", index / total * 100)
+
             summary = f"全部完成：成功 {ok_count} 個，失敗 {fail_count} 個"
             log(summary, "ok")
-            self._emit("done", summary)
+            self._emit("done", summary, True)
 
         except Cancelled:
             log("任務已中止。", "warn")
-            self._emit("done", "已中止")
+            self._emit("done", "已中止", False)
         except Exception as exc:
             log(f"未預期的錯誤：{exc}", "error")
             log(traceback.format_exc(), "error")
-            self._emit("done", "發生錯誤")
+            self._emit("done", "發生錯誤", False)
 
     # ---------- 啟動檢查 ----------
 

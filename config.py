@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import os
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ APP_VERSION = "1.0.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "output"
+SETTINGS_FILE = BASE_DIR / "settings.json"
 
 SUPPORTED_BROWSERS = ["edge", "chrome", "firefox", "brave", "opera", "vivaldi", "chromium"]
 
@@ -206,3 +208,22 @@ def resolve_encoder(choice: str, exclude: set[str] | None = None) -> str:
     if choice == "auto":
         return usable[0]
     return choice if choice in usable else "cpu"
+
+
+def save_settings(data: dict) -> None:
+    """把 GUI 設定寫成 JSON。寫檔失敗不該讓程式掛掉，所以吞掉例外。"""
+    try:
+        SETTINGS_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def load_settings() -> dict:
+    """讀回上次的設定。檔案不存在或損毀都回傳空字典，讓 GUI 用預設值。"""
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
