@@ -1,0 +1,3 @@
+# default extras 含 pycryptodomex / websockets / mutagen / brotli / certifi，
+# 分別對應 AES-HLS 解密、直播串流、metadata 寫入與壓縮回應。
+yt-dlp[default]>=2025.1.1

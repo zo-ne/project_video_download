@@ -1,0 +1,38 @@
+# ---- 最高風險：憑證類 ----
+# yt-dlp 匯出的 cookie 檔等同帳號通行證，session cookie 可繞過兩步驟驗證
+cookies.txt
+*cookies*.txt
+*.cookies
+cookies/
+
+# ---- 開發工具的本機設定（內含使用者名稱與完整路徑）----
+.claude/
+*.local.json
+
+# ---- 虛擬環境（含指向本機的絕對路徑，且無法跨機器重用）----
+.venv/
+venv/
+env/
+
+# ---- 下載內容：他人的著作 + 你的觀看紀錄 ----
+output/
+
+# ---- 外部執行檔：體積龐大，且 FFmpeg 為 GPL 授權，轉散布有義務 ----
+bin/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- 編輯器 / 作業系統 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- 開發過程的暫存腳本 ----
+_*.py
+*.processing.mp4

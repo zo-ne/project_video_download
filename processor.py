@@ -1,0 +1,182 @@
+"""FFmpeg 後製：邊緣裁切 (crop) 或區域模糊去水印 (blur)。"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import threading
+from pathlib import Path
+from typing import Callable
+
+from config import (
+    Cancelled,
+    ClipSettings,
+    NO_WINDOW,
+    VERTICAL_RATIOS,
+    find_ffmpeg,
+    find_ffprobe,
+)
+
+LogFn = Callable[[str, str], None]
+ProgressFn = Callable[[float, str], None]
+
+
+def build_filter(s: ClipSettings) -> str:
+    """依設定串起 filter_complex，輸出標籤固定為 [v]。
+
+    去水印（crop / blur）先做，直式裁切後做，兩者可以疊加。
+    """
+    segments: list[str] = []
+    label = "0:v"
+    step = 0
+
+    if s.enabled and s.mode == "crop":
+        w = f"trunc((iw-{s.crop_left}-{s.crop_right})/2)*2"
+        h = f"trunc((ih-{s.crop_top}-{s.crop_bottom})/2)*2"
+        out = f"s{step}"
+        segments.append(f"[{label}]crop={w}:{h}:{s.crop_left}:{s.crop_top}[{out}]")
+        label, step = out, step + 1
+    elif s.enabled and s.mode == "blur":
+        # 切兩路，一路裁出水印區域做模糊，再疊回原畫面
+        x, y, w, h = s.blur_x, s.blur_y, s.blur_w, s.blur_h
+        strength = max(1, s.blur_strength)
+        base, tmp, fg, out = f"b{step}", f"t{step}", f"f{step}", f"s{step}"
+        segments.append(
+            f"[{label}]split=2[{base}][{tmp}];"
+            f"[{tmp}]crop={w}:{h}:{x}:{y},boxblur={strength}:1[{fg}];"
+            f"[{base}][{fg}]overlay={x}:{y}[{out}]"
+        )
+        label, step = out, step + 1
+
+    if s.vertical:
+        ratio = VERTICAL_RATIOS.get(s.vertical_ratio, 9 / 16)
+        # 用 ffmpeg 運算式在執行期判斷：畫面比目標更寬才裁寬度，
+        # 本來就是直式（夠窄）的來源會原樣通過，不必先探測解析度。
+        width = f"trunc(if(gt(iw\\,ih*{ratio:.6f})\\,ih*{ratio:.6f}\\,iw)/2)*2"
+        anchor = {
+            "left": "0",
+            "right": "in_w-out_w",
+        }.get(s.vertical_anchor, "(in_w-out_w)/2")
+        out = f"s{step}"
+        segments.append(f"[{label}]crop={width}:ih:{anchor}:0[{out}]")
+        label, step = out, step + 1
+
+    if not segments:
+        return "[0:v]null[v]"
+
+    # 最後一段的輸出標籤改名為 [v]
+    segments[-1] = segments[-1].rsplit(f"[{label}]", 1)[0] + "[v]"
+    return ";".join(segments)
+
+
+def validate(s: ClipSettings) -> str | None:
+    """回傳錯誤訊息，設定合法則回傳 None。"""
+    if s.enabled and s.mode == "crop":
+        if min(s.crop_top, s.crop_bottom, s.crop_left, s.crop_right) < 0:
+            return "裁切像素不可為負數。"
+        if s.crop_top + s.crop_bottom == 0 and s.crop_left + s.crop_right == 0:
+            return "裁切模式至少要有一邊大於 0。"
+    elif s.enabled and s.mode == "blur":
+        if s.blur_w <= 0 or s.blur_h <= 0:
+            return "模糊區域的寬與高必須大於 0。"
+        if s.blur_x < 0 or s.blur_y < 0:
+            return "模糊區域座標不可為負數。"
+    return None
+
+
+def probe_duration(path: Path) -> float:
+    """取得影片長度（秒），失敗回傳 0。"""
+    ffprobe = find_ffprobe()
+    if not ffprobe:
+        return 0.0
+    cmd = [
+        ffprobe, "-v", "quiet", "-print_format", "json",
+        "-show_entries", "format=duration", str(path),
+    ]
+    try:
+        out = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW
+        )
+        return float(json.loads(out.stdout)["format"]["duration"])
+    except Exception:
+        return 0.0
+
+
+def process(
+    src: Path,
+    settings: ClipSettings,
+    log: LogFn,
+    progress: ProgressFn,
+    cancel_event: threading.Event,
+) -> Path:
+    """對 src 執行剪輯，回傳最終檔案路徑。
+
+    keep_original=True 時輸出 `<原檔名>_edited.mp4`，否則就地取代原檔。
+    """
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError("找不到 ffmpeg，請安裝並加入 PATH，或放到專案的 bin/ 目錄。")
+
+    tmp = src.with_name(f"{src.stem}.processing.mp4")
+    final = (
+        src.with_name(f"{src.stem}_edited.mp4") if settings.keep_original else src
+    )
+
+    duration = probe_duration(src)
+    vf = build_filter(settings)
+
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(src),
+        "-filter_complex", vf,
+        "-map", "[v]", "-map", "0:a?",
+        "-c:v", "libx264", "-crf", "18", "-preset", "veryfast",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        "-progress", "pipe:1", "-nostats",
+        str(tmp),
+    ]
+
+    log(f"FFmpeg 濾鏡：{vf}", "info")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=NO_WINDOW,
+    )
+
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if cancel_event.is_set():
+                proc.terminate()
+                raise Cancelled()
+            line = line.strip()
+            if line.startswith("out_time_us=") and duration > 0:
+                raw = line.split("=", 1)[1]
+                if raw.isdigit():
+                    pct = min(100.0, int(raw) / 1_000_000 / duration * 100)
+                    progress(pct, f"剪輯中 {pct:5.1f}%")
+            elif line == "progress=end":
+                progress(100.0, "剪輯完成")
+
+        proc.wait()
+        if proc.returncode != 0:
+            stderr = (proc.stderr.read() if proc.stderr else "").strip()
+            raise RuntimeError(f"FFmpeg 失敗 (code {proc.returncode})：{stderr[:500]}")
+
+        # 成功才覆蓋目標檔，避免中途失敗留下半成品
+        if final.exists() and final != src:
+            final.unlink()
+        if not settings.keep_original:
+            src.unlink()
+        tmp.replace(final)
+        return final
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+        tmp.unlink(missing_ok=True)
