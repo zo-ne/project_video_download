@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 APP_NAME = "影片下載 / 自動微剪輯工具"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "output"

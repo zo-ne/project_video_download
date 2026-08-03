@@ -13,9 +13,11 @@
 | 批次下載 | 每行一個網址，支援單片與播放清單 |
 | 最高畫質 | 自動挑選最佳影音分軌並用 FFmpeg 合併 |
 | 邊緣裁切 | 指定上／下／左／右要裁掉的像素 |
-| 區域遮罩 | 指定矩形區域做模糊處理 |
+| 區域遮罩 | 指定矩形區域做模糊 (boxblur) 或插補 (delogo) |
 | 直式轉換 | 轉成 9:16 / 4:5 / 1:1，可選取景位置 |
-| 即時進度 | 下載與後製的進度條、日誌，可隨時中止 |
+| 硬體加速 | NVENC / QSV / AMF 可選，失敗自動退回 CPU |
+| 即時進度 | 目前步驟與整批加權進度雙進度條，可隨時中止 |
+| 記住設定 | 選項保存於 `settings.json`，下次開啟自動還原 |
 
 處理後的檔案預設另存 `原檔名_edited.mp4`，原始檔保留。
 
@@ -23,7 +25,7 @@
 
 ---
 
-## 我在這個專案裡處理的四個問題
+## 我在這個專案裡處理的五個問題
 
 ### 1. 怎麼讓 GUI 在跑重任務時不凍結
 
@@ -89,7 +91,25 @@ crop=trunc(if(gt(iw\,ih*0.5625)\,ih*0.5625\,iw)/2)*2:ih:(in_w-out_w)/2:0
 [0:v]crop=...[s0];[s0]crop=...[v]
 ```
 
-### 4. 環境問題比我想像的多
+### 4. 「支援」與「跑得動」是兩回事
+
+加硬體加速時我先用 `ffmpeg -encoders` 偵測有哪些可用，本機列出了 NVENC，於是預設就挑它。實際跑下去才發現：
+
+```
+Driver does not support the required nvenc API version. Required: 13.1 Found: 11.1
+```
+
+FFmpeg 把 NVENC **編譯進去了**，但這台機器的顯卡驅動版本太舊。偵測結果是「理論支援」，不是「實際可用」。
+
+所以改成兩層：`available_encoders()` 先問 FFmpeg 有哪些，真正編碼失敗時再退回 CPU 重跑，並把該編碼器記進 `_broken_encoders`，同一批後續檔案不再浪費一次嘗試。
+
+```python
+attempts = [encoder] if encoder == "cpu" else [encoder, "cpu"]
+```
+
+這件事讓我學到：**能力偵測要以實際執行結果為準**，靜態查詢只能當作第一層篩選。如果我只在自己機器上跑一次成功就收工，這個 bug 會留給每一個驅動版本不同的使用者。
+
+### 5. 環境問題比我想像的多
 
 這部分沒什麼演算法，但佔掉我不少時間，也是我覺得學到最多的地方。
 
@@ -114,7 +134,28 @@ crop=trunc(if(gt(iw\,ih*0.5625)\,ih*0.5625\,iw)/2)*2:ih:(in_w-out_w)/2:0
 
 ## 驗證方式
 
-我沒有寫自動化測試（這是目前最大的不足，見下方），所以用手動實測逐項確認，並記錄實際數字：
+### 單元測試
+
+濾鏡組裝的三個函式（`build_filter` / `validate` / `build_video_args`）是純函式——輸入設定、輸出字串，不碰檔案也不開行程，所以能在沒有 FFmpeg 的環境下測：
+
+```bat
+.venv\Scripts\python.exe -m pytest tests -q
+30 passed
+```
+
+測試重點放在**不變條件**而不是逐行覆蓋。例如 `process()` 固定用 `-map [v]`，所以任何設定組合產生的濾鏡圖都必須以 `[v]` 結尾——這條壞掉整支程式就失效，因此獨立成一個測試：
+
+```python
+def test_every_filter_graph_ends_with_v_label():
+    for s in combos:
+        assert build_filter(s).endswith("[v]"), s
+```
+
+其餘涵蓋邊界條件：全零裁切、負值、零面積區域、delogo 貼齊邊緣、未知比例的退回行為、品質值的範圍夾制。
+
+### 手動實測
+
+會碰到實際檔案與外部行程的部分沒辦法只靠單元測試，逐項跑過並記錄實際數字：
 
 | 項目 | 結果 |
 | --- | --- |
@@ -127,23 +168,29 @@ crop=trunc(if(gt(iw\,ih*0.5625)\,ih*0.5625\,iw)/2)*2:ih:(in_w-out_w)/2:0
 | 直式 1:1 | 1920x1080 → 1080x1080 |
 | 濾鏡疊加 | 裁頂 80 + 直式 → 562x1000；遮罩 + 直式 → 606x1080 |
 | 取景位置 | 靠左／置中／靠右 產出三種不同 hash、相同尺寸的畫面 |
-| 中止 | 拋出例外、清除暫存、原始檔完整 |
+| 去標誌 (delogo) | 尺寸與音軌不變，指定區域由周圍像素插補 |
+| 硬體加速退回 | 本機 NVENC 因驅動過舊失敗 → 自動改用 CPU 完成 |
+| 中止 | 後製階段拋出例外、清除暫存、原始檔完整 |
 | 跨版本 | Python 3.11.9 與 3.14.5 皆通過 |
 
 「取景位置」那項我一開始只確認輸出尺寸相同就算過，後來想到**尺寸相同不代表取景真的有變**，才改成比對畫格的 hash——三個位置產出三個不同 hash，這樣才算真的驗過。
 
 ---
 
-## 目前的限制與想改進的地方
+## 已知問題與待改進
 
-誠實列出我知道但還沒做的部分：
+### 已知 Bug
 
-- **沒有單元測試。** `build_filter()` 是純函式、最適合測試，這是我接下來第一件要補的事。
-- **進度條是單檔進度**，不是整批的加權進度，批次下載時看起來會反覆歸零。
-- **一律重新編碼。** 目前固定用 libx264 CRF 18，沒有做「只有容器改變時直接 copy」的判斷，也沒有 GPU 加速選項。
-- **遮罩用 boxblur。** 對真實浮水印來說 FFmpeg 的 `delogo` 濾鏡可能效果更好，我還沒比較過。
-- **設定不會保存**，每次開啟都要重新填參數。
-- **Chrome / Edge 新版的 App-Bound Encryption** 會讓 cookie 讀取失敗，目前只能建議改用 Firefox，我還沒研究有沒有其他解法。
+- **中止在下載階段不會立即生效。** 我實測驗證過：progress hook 拋的是自訂的 `Cancelled`，但 `ignoreerrors=True` 讓 yt-dlp 內部的 `except Exception` 把它吃掉，函式正常返回空清單。停止仍會生效，但要等到 `_run_job` 迴圈頂端才真正停下，中間會噴出多餘的錯誤日誌。正解是改拋 `yt_dlp.utils.DownloadCancelled`——那是唯一會被 yt-dlp 重新拋出、繞過 `ignoreerrors` 的例外。後製階段的中止則正常。
+
+### 待改進
+
+- **`_run_ffmpeg` 的 stderr 讀取時機有死鎖風險。** 目前在迴圈讀 stdout、等 `wait()` 之後才讀 stderr，若 stderr 寫滿 pipe buffer 就會互相等待。因為 `-loglevel error` 讓輸出量很小所以還沒發生，但正確作法是 `communicate()` 或另開執行緒。
+- **中止依賴 FFmpeg 持續輸出進度。** `for line in proc.stdout` 是阻塞的，FFmpeg 若卡住不吐資料，取消檢查就不會執行，目前也沒有 timeout。
+- **遮罩區域沒有對照實際解析度驗證**，只檢查大於 0。填了超出畫面的座標要等 FFmpeg 執行才失敗。
+- **`gui.py` 有 676 行，`App` 什麼都做**——建 UI、管執行緒、驗證、序列化設定、跑批次任務。導致 `_run_job` 無法單獨測試。下一步想把它抽成獨立的 job runner。
+- **測試只覆蓋 `processor` 的純函式**，`downloader` 與 `gui` 尚無測試，也還沒導入 CI。
+- **Chrome / Edge 新版的 App-Bound Encryption** 會讓 cookie 讀取失敗，目前只能建議改用 Firefox。
 - **沒有打包成執行檔**，使用者需要自己準備 Python 環境。
 
 ---
@@ -156,6 +203,13 @@ crop=trunc(if(gt(iw\,ih*0.5625)\,ih*0.5625\,iw)/2)*2:ih:(in_w-out_w)/2:0
 uv venv --python 3.14
 uv pip install -r requirements.txt
 .venv\Scripts\python.exe main.py
+```
+
+跑測試：
+
+```bat
+uv pip install pytest
+.venv\Scripts\python.exe -m pytest tests -q
 ```
 
 外部工具：
@@ -174,11 +228,12 @@ winget install --id DenoLand.Deno -e   # yt-dlp 解 YouTube 簽章挑戰用
 ## 專案結構
 
 ```
-main.py         進入點：相依檢查與 PATH 修正
-gui.py          Tkinter 介面、執行緒調度、事件佇列
-downloader.py   yt-dlp 封裝：格式挑選、合併、cookie、進度 hook
-processor.py    FFmpeg 濾鏡鏈組裝與進度解析
-config.py       設定資料結構、工具路徑搜尋
+main.py               進入點：相依檢查與 PATH 修正
+gui.py                Tkinter 介面、執行緒調度、事件佇列
+downloader.py         yt-dlp 封裝：格式挑選、合併、cookie、進度 hook
+processor.py          FFmpeg 濾鏡鏈組裝、編碼器選擇與進度解析
+config.py             設定資料結構、工具路徑搜尋、設定保存
+tests/                單元測試
 ```
 
 `downloader.py`、`processor.py`、`config.py` 完全不 import tkinter，介面相關的東西只存在於 `gui.py`（`main.py` 只在啟動檢查時確認 tkinter 裝了沒）。處理邏輯與介面分離，之後想改成 CLI 或換 GUI 框架時不必動到核心。
