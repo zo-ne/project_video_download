@@ -164,6 +164,11 @@ class App:
             variable=self.var_mode, command=self._sync_option_state,
         )
         self.rb_blur.pack(side="left", padx=(12, 0))
+        self.rb_delogo = ttk.Radiobutton(
+            self.mode_row, text="去標誌 (Delogo)", value="delogo",
+            variable=self.var_mode, command=self._sync_option_state,
+        )
+        self.rb_delogo.pack(side="left", padx=(12, 0))
 
         # --- crop 參數 ---
         self.crop_frame = ttk.Frame(frame, padding=(0, 6, 0, 0))
@@ -176,7 +181,7 @@ class App:
         ]
         self.crop_entries = self._spin_row(self.crop_frame, specs, limit=4000)
 
-        # --- blur 參數 ---
+        # --- blur / delogo 共用的區域參數 ---
         self.blur_frame = ttk.Frame(frame, padding=(0, 6, 0, 0))
         self.blur_frame.pack(fill="x")
         specs = [
@@ -184,9 +189,14 @@ class App:
             ("Y", self.var_blur_y),
             ("寬", self.var_blur_w),
             ("高", self.var_blur_h),
-            ("強度", self.var_blur_strength),
         ]
-        self.blur_entries = self._spin_row(self.blur_frame, specs, limit=4000)
+        self.region_entries = self._spin_row(self.blur_frame, specs, limit=4000)
+        self.lbl_strength = ttk.Label(self.blur_frame, text="強度")
+        self.lbl_strength.pack(side="left", padx=(0, 4))
+        self.spin_strength = ttk.Spinbox(
+            self.blur_frame, from_=1, to=100, textvariable=self.var_blur_strength, width=7
+        )
+        self.spin_strength.pack(side="left")
 
         ttk.Separator(frame, orient="horizontal").pack(fill="x", pady=8)
 
@@ -282,7 +292,7 @@ class App:
         clip_on = self.var_clip.get()
         vertical_on = self.var_vertical.get()
 
-        for widget in (self.rb_crop, self.rb_blur):
+        for widget in (self.rb_crop, self.rb_blur, self.rb_delogo):
             widget.configure(state="normal" if clip_on else "disabled")
         # 兩種處理任一開啟就會產生新檔，保留原始檔的選項才有意義
         self.chk_keep.configure(state="normal" if (clip_on or vertical_on) else "disabled")
@@ -291,12 +301,17 @@ class App:
         self.cmb_ratio.configure(state=state)
         self.cmb_anchor.configure(state=state)
 
-        crop_on = clip_on and self.var_mode.get() == "crop"
-        blur_on = clip_on and self.var_mode.get() == "blur"
+        mode = self.var_mode.get()
+        crop_on = clip_on and mode == "crop"
+        region_on = clip_on and mode in ("blur", "delogo")
         for spin in self.crop_entries:
             spin.configure(state="normal" if crop_on else "disabled")
-        for spin in self.blur_entries:
-            spin.configure(state="normal" if blur_on else "disabled")
+        for spin in self.region_entries:
+            spin.configure(state="normal" if region_on else "disabled")
+        # delogo 是往內插補，沒有「強度」可調
+        strength_on = clip_on and mode == "blur"
+        self.spin_strength.configure(state="normal" if strength_on else "disabled")
+        self.lbl_strength.configure(foreground="#333" if strength_on else "#aaa")
 
     def _set_running(self, running: bool) -> None:
         self.btn_start.configure(state="disabled" if running else "normal")

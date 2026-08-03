@@ -1,4 +1,4 @@
-"""FFmpeg 後製：邊緣裁切 (crop) 或區域模糊去水印 (blur)。"""
+"""FFmpeg 後製：邊緣裁切、區域模糊 / 去標誌、直式轉換。"""
 
 from __future__ import annotations
 
@@ -47,6 +47,14 @@ def build_filter(s: ClipSettings) -> str:
             f"[{base}][{fg}]overlay={x}:{y}[{out}]"
         )
         label, step = out, step + 1
+    elif s.enabled and s.mode == "delogo":
+        # delogo 用周圍像素往內插補，對半透明浮水印通常比整塊模糊自然
+        out = f"s{step}"
+        segments.append(
+            f"[{label}]delogo=x={s.blur_x}:y={s.blur_y}:"
+            f"w={s.blur_w}:h={s.blur_h}[{out}]"
+        )
+        label, step = out, step + 1
 
     if s.vertical:
         ratio = VERTICAL_RATIOS.get(s.vertical_ratio, 9 / 16)
@@ -76,11 +84,15 @@ def validate(s: ClipSettings) -> str | None:
             return "裁切像素不可為負數。"
         if s.crop_top + s.crop_bottom == 0 and s.crop_left + s.crop_right == 0:
             return "裁切模式至少要有一邊大於 0。"
-    elif s.enabled and s.mode == "blur":
+    elif s.enabled and s.uses_region:
+        name = "模糊" if s.mode == "blur" else "去標誌"
         if s.blur_w <= 0 or s.blur_h <= 0:
-            return "模糊區域的寬與高必須大於 0。"
+            return f"{name}區域的寬與高必須大於 0。"
         if s.blur_x < 0 or s.blur_y < 0:
-            return "模糊區域座標不可為負數。"
+            return f"{name}區域座標不可為負數。"
+        # delogo 需要靠周圍像素插補，區域貼齊邊界時 FFmpeg 會直接報錯
+        if s.mode == "delogo" and (s.blur_x < 1 or s.blur_y < 1):
+            return "去標誌區域需與畫面邊緣至少相距 1 像素（改用區域模糊可貼邊）。"
     return None
 
 

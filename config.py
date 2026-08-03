@@ -43,7 +43,7 @@ class ClipSettings:
     """自動剪輯 / 去水印設定。"""
 
     enabled: bool = False
-    mode: str = "crop"  # "crop" 或 "blur"
+    mode: str = "crop"  # "crop" / "blur" / "delogo"
 
     # crop 模式：四邊要裁掉的像素
     crop_top: int = 80
@@ -51,12 +51,12 @@ class ClipSettings:
     crop_left: int = 0
     crop_right: int = 0
 
-    # blur 模式：要模糊的矩形區域 (左上角 x, y 與寬高)
+    # blur / delogo 模式：要處理的矩形區域 (左上角 x, y 與寬高)
     blur_x: int = 0
     blur_y: int = 0
     blur_w: int = 240
     blur_h: int = 80
-    blur_strength: int = 12
+    blur_strength: int = 12  # 僅 blur 模式使用
 
     # 直式短影音裁切：只裁寬度，畫面比目標更寬時才動作
     vertical: bool = False
@@ -69,6 +69,11 @@ class ClipSettings:
     def needs_processing(self) -> bool:
         """去水印與直式裁切各自獨立，任一開啟就要送進 FFmpeg。"""
         return self.enabled or self.vertical
+
+    @property
+    def uses_region(self) -> bool:
+        """blur 與 delogo 共用同一組矩形區域參數。"""
+        return self.mode in ("blur", "delogo")
 
 
 @dataclass
