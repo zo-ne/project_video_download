@@ -636,10 +636,6 @@ class App:
         self.txt_urls.focus_set()
 
     def _clear_urls(self) -> None:
-        if not self._url_lines():
-            return
-        if not messagebox.askokcancel("清空網址", "確定要清空所有網址嗎？"):
-            return
         self.txt_urls.delete("1.0", "end")
 
     def _dedupe_urls(self) -> None:
