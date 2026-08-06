@@ -178,6 +178,21 @@ class App:
 
         self.txt_urls = scrolledtext.ScrolledText(frame, height=5, wrap="none", font=("Consolas", 10))
         self.txt_urls.pack(fill="x")
+        # Ctrl+D 刪掉游標所在（或選取範圍內）的網址
+        self.txt_urls.bind("<Control-d>", self._on_delete_selected_urls)
+        self.txt_urls.bind("<Control-D>", self._on_delete_selected_urls)
+
+        row = ttk.Frame(frame)
+        row.pack(fill="x", pady=(6, 0))
+        ttk.Button(
+            row, text="刪除選取 (Ctrl+D)", command=self._delete_selected_urls, width=18
+        ).pack(side="left")
+        ttk.Button(row, text="清空全部", command=self._clear_urls, width=10).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Button(row, text="去除重複", command=self._dedupe_urls, width=10).pack(
+            side="left", padx=(6, 0)
+        )
 
     def _build_options_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text=" 選項 ", padding=8)
@@ -453,6 +468,53 @@ class App:
         self.txt_log.see("end")
         self.txt_log.configure(state="disabled")
 
+    # ---------- 網址欄 ----------
+
+    def _url_lines(self) -> list[str]:
+        raw = self.txt_urls.get("1.0", "end").strip()
+        return [line.strip() for line in raw.splitlines() if line.strip()]
+
+    def _set_url_lines(self, lines: list[str]) -> None:
+        self.txt_urls.delete("1.0", "end")
+        if lines:
+            self.txt_urls.insert("1.0", "\n".join(lines) + "\n")
+
+    def _on_delete_selected_urls(self, _event) -> str:
+        self._delete_selected_urls()
+        return "break"  # 蓋掉 Text 內建的 Ctrl+D
+
+    def _delete_selected_urls(self) -> None:
+        """刪掉選取範圍碰到的整行；沒有選取就刪游標所在那一行。"""
+        try:
+            first = int(self.txt_urls.index("sel.first").split(".")[0])
+            last_index = self.txt_urls.index("sel.last")
+            last = int(last_index.split(".")[0])
+            # 選取剛好停在行首時，那一行其實沒被選到，不要跟著刪
+            if last > first and last_index.endswith(".0"):
+                last -= 1
+        except Exception:
+            first = last = int(self.txt_urls.index("insert").split(".")[0])
+
+        self.txt_urls.delete(f"{first}.0", f"{last + 1}.0")
+        self.txt_urls.focus_set()
+
+    def _clear_urls(self) -> None:
+        if not self._url_lines():
+            return
+        if not messagebox.askokcancel("清空網址", "確定要清空所有網址嗎？"):
+            return
+        self.txt_urls.delete("1.0", "end")
+
+    def _dedupe_urls(self) -> None:
+        lines = self._url_lines()
+        unique = list(dict.fromkeys(lines))
+        removed = len(lines) - len(unique)
+        if not removed:
+            self._append_log("沒有重複的網址。", "info")
+            return
+        self._set_url_lines(unique)
+        self._append_log(f"已移除 {removed} 個重複網址。", "ok")
+
     def _clear_log(self) -> None:
         self.txt_log.configure(state="normal")
         self.txt_log.delete("1.0", "end")
@@ -476,8 +538,7 @@ class App:
             subprocess.Popen(["xdg-open", str(path)])
 
     def _collect_settings(self) -> tuple[DownloadSettings, ClipSettings] | None:
-        raw = self.txt_urls.get("1.0", "end").strip()
-        urls = [line.strip() for line in raw.splitlines() if line.strip()]
+        urls = self._url_lines()
         if not urls:
             messagebox.showwarning("缺少網址", "請至少輸入一個影片網址。")
             return None
