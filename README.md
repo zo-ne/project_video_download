@@ -11,6 +11,8 @@
 | 功能 | 說明 |
 | --- | --- |
 | 批次下載 | 每行一個網址，支援單片與播放清單 |
+| 自訂檔名 | yt-dlp 樣板，可用標題／頻道／日期／流水號等欄位 |
+| 輸出格式 | MP4 / MKV / WebM 可選 |
 | 網址管理 | 刪除選取行 (Ctrl+D)、一鍵清空、去除重複 |
 | 最高畫質 | 自動挑選最佳影音分軌並用 FFmpeg 合併 |
 | 邊緣裁切 | 指定上／下／左／右要裁掉的像素 |
@@ -20,7 +22,7 @@
 | 即時進度 | 目前步驟與整批加權進度雙進度條，可隨時中止 |
 | 記住設定 | 選項保存於 `settings.json`，下次開啟自動還原 |
 
-處理後的檔案預設另存 `原檔名_edited.mp4`，原始檔保留。
+處理後的檔案預設另存 `原檔名_edited.<原容器>`，原始檔保留。後製一定會重新編碼成 H.264，而 WebM 裝不下 H.264，所以來源是 WebM 時輸出會改成 MP4。
 
 網址是直接交給 yt-dlp 處理的，程式本身**沒有任何網域判斷**，所以 yt-dlp 支援的站台（目前版本內建 1750 個 extractor）理論上都能用。我實際測過的是 YouTube 與 Bilibili，其餘未逐一驗證。
 
@@ -51,7 +53,7 @@ def _emit(self, kind: str, *payload) -> None:
 改成先寫暫存檔，確認 return code 為 0 才置換：
 
 ```python
-tmp = src.with_name(f"{src.stem}.processing.mp4")
+tmp = src.with_name(f"{src.stem}.processing{suffix}")
 ...
 finally:
     if proc.poll() is None:

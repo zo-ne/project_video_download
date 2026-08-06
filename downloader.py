@@ -8,7 +8,12 @@ from typing import Callable
 
 import yt_dlp
 
-from config import Cancelled, DownloadSettings, find_ffmpeg
+from config import (
+    Cancelled,
+    DownloadSettings,
+    FORMAT_SELECTORS,
+    find_ffmpeg,
+)
 
 LogFn = Callable[[str, str], None]           # (訊息, 層級)
 ProgressFn = Callable[[float, str], None]    # (0~100, 狀態文字)
@@ -23,11 +28,15 @@ class Downloader:
         log: LogFn,
         progress: ProgressFn,
         cancel_event: threading.Event,
+        autonumber_start: int = 1,
     ) -> None:
         self.settings = settings
         self.log = log
         self.progress = progress
         self.cancel_event = cancel_event
+        # 每個網址都會開一個新的 Downloader，%(autonumber)s 的計數要由外面接續，
+        # 否則整批下來每個網址都會從 1 重來、固定檔名還是會撞在一起
+        self.autonumber_start = autonumber_start
         self._finished: list[Path] = []
 
     # ---------- yt-dlp hooks ----------
@@ -64,12 +73,14 @@ class Downloader:
     # ---------- 選項 ----------
 
     def _ydl_opts(self) -> dict:
-        outtmpl = str(self.settings.output_dir / "%(title)s.%(ext)s")
+        container = self.settings.container
+        template = self.settings.filename_template.strip()
+        outtmpl = str(self.settings.output_dir / f"{template}.%(ext)s")
         opts: dict = {
-            # 先挑最佳影音分軌合併，取不到才退回單一檔
-            "format": "bestvideo*+bestaudio/best",
-            "merge_output_format": "mp4",
+            "format": FORMAT_SELECTORS.get(container, FORMAT_SELECTORS["mp4"]),
+            "merge_output_format": container,
             "outtmpl": outtmpl,
+            "autonumber_start": self.autonumber_start,
             "restrictfilenames": False,
             "windowsfilenames": True,
             "noplaylist": False,

@@ -13,6 +13,7 @@ from config import (
     ClipSettings,
     ENCODER_CODECS,
     NO_WINDOW,
+    PROCESSABLE_SUFFIXES,
     VERTICAL_RATIOS,
     find_ffmpeg,
     find_ffprobe,
@@ -127,6 +128,16 @@ def validate(s: ClipSettings) -> str | None:
     return None
 
 
+def output_suffix(src: Path) -> str:
+    """後製後要用哪種容器。
+
+    後製一定會重新編碼成 H.264，而 webm 只收 VP8/VP9/AV1，
+    所以 webm（或任何不認識的副檔名）一律改寫成 mp4。
+    """
+    suffix = src.suffix.lower()
+    return suffix if suffix in PROCESSABLE_SUFFIXES else ".mp4"
+
+
 def probe_duration(path: Path) -> float:
     """取得影片長度（秒），失敗回傳 0。"""
     ffprobe = find_ffprobe()
@@ -213,10 +224,13 @@ def process(
     if not ffmpeg:
         raise RuntimeError("找不到 ffmpeg，請安裝並加入 PATH，或放到專案的 bin/ 目錄。")
 
-    tmp = src.with_name(f"{src.stem}.processing.mp4")
-    final = (
-        src.with_name(f"{src.stem}_edited.mp4") if settings.keep_original else src
-    )
+    suffix = output_suffix(src)
+    tmp = src.with_name(f"{src.stem}.processing{suffix}")
+    if settings.keep_original or suffix != src.suffix.lower():
+        # 容器換掉時就算選了「不保留原始檔」也不能就地覆蓋，副檔名對不上
+        final = src.with_name(f"{src.stem}_edited{suffix}")
+    else:
+        final = src
 
     duration = probe_duration(src)
     vf = build_filter(settings)
@@ -225,6 +239,15 @@ def process(
     encoder = resolve_encoder(settings.encoder, exclude=_broken_encoders)
     # 「編進 FFmpeg」不等於「這台機器跑得動」，所以硬體編碼保留一次退回機會
     attempts = [encoder] if encoder == "cpu" else [encoder, "cpu"]
+
+    # 容器沒變就直接複製音軌；換容器（webm → mp4）時原本的 Opus 不一定裝得進去，
+    # 轉成 AAC 保險
+    audio_args = (
+        ["-c:a", "copy"] if suffix == src.suffix.lower()
+        else ["-c:a", "aac", "-b:a", "192k"]
+    )
+    # +faststart 是 mp4 muxer 專屬選項，丟給 matroska 會直接讓 ffmpeg 報錯
+    mux_args = ["-movflags", "+faststart"] if suffix == ".mp4" else []
 
     try:
         for attempt in attempts:
@@ -235,8 +258,8 @@ def process(
                 "-filter_complex", vf,
                 "-map", "[v]", "-map", "0:a?",
                 *build_video_args(attempt, settings.quality),
-                "-c:a", "copy",
-                "-movflags", "+faststart",
+                *audio_args,
+                *mux_args,
                 "-progress", "pipe:1", "-nostats",
                 str(tmp),
             ]

@@ -24,12 +24,16 @@ from config import (
     OUTPUT_DIR,
     SUPPORTED_BROWSERS,
     VERTICAL_ANCHORS,
+    DEFAULT_FILENAME_TEMPLATE,
     VERTICAL_FILLS,
     VERTICAL_RATIOS,
+    VIDEO_FORMATS,
     available_encoders,
     find_ffmpeg,
+    has_template_field,
     load_settings,
     save_settings,
+    validate_filename_template,
 )
 from downloader import Downloader
 
@@ -72,6 +76,8 @@ class App:
         self.var_outdir = StringVar(value=str(OUTPUT_DIR))
         self.var_cookies = BooleanVar(value=False)
         self.var_browser = StringVar(value="edge")
+        self.var_filename = StringVar(value=DEFAULT_FILENAME_TEMPLATE)
+        self.var_container = StringVar(value=next(iter(VIDEO_FORMATS)))
 
         self.var_clip = BooleanVar(value=False)
         self.var_mode = StringVar(value="crop")
@@ -110,6 +116,8 @@ class App:
             "outdir": self.var_outdir,
             "cookies": self.var_cookies,
             "browser": self.var_browser,
+            "filename": self.var_filename,
+            "container": self.var_container,
             "clip": self.var_clip,
             "mode": self.var_mode,
             "keep_original": self.var_keep_original,
@@ -137,6 +145,7 @@ class App:
         # 否則之後用它去查字典會 KeyError
         allowed = {
             "browser": SUPPORTED_BROWSERS,
+            "container": list(VIDEO_FORMATS),
             "mode": ["crop", "blur", "delogo"],
             "vertical_ratio": list(VERTICAL_RATIOS),
             "vertical_anchor": list(VERTICAL_ANCHORS),
@@ -377,6 +386,28 @@ class App:
             side="left", padx=(6, 0)
         )
 
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=(6, 0))
+        ttk.Label(row, text="檔名樣板：").pack(side="left")
+        ttk.Entry(row, textvariable=self.var_filename).pack(
+            side="left", fill="x", expand=True, padx=(0, 6)
+        )
+        ttk.Button(row, text="還原預設", command=self._reset_filename, width=9).pack(
+            side="left"
+        )
+        ttk.Label(row, text="格式").pack(side="left", padx=(12, 4))
+        ttk.Combobox(
+            row, textvariable=self.var_container, values=list(VIDEO_FORMATS),
+            state="readonly", width=22,
+        ).pack(side="left")
+
+        ttk.Label(
+            parent,
+            text="可用 %(title)s 標題、%(id)s 影片 ID、%(uploader)s 頻道、"
+                 "%(upload_date)s 上傳日期、%(autonumber)s 流水號；副檔名會自動補。",
+            foreground="#666",
+        ).pack(anchor="w", pady=(2, 0))
+
     def _build_control_section(self, parent: ttk.Frame) -> None:
         frame = ttk.Frame(parent)
         frame.pack(fill="x", pady=(12, 0))
@@ -572,6 +603,9 @@ class App:
         else:
             subprocess.Popen(["xdg-open", str(path)])
 
+    def _reset_filename(self) -> None:
+        self.var_filename.set(DEFAULT_FILENAME_TEMPLATE)
+
     def _collect_settings(self) -> tuple[DownloadSettings, ClipSettings] | None:
         urls = self._url_lines()
         if not urls:
@@ -585,11 +619,28 @@ class App:
             messagebox.showerror("輸出資料夾錯誤", f"無法建立資料夾：{exc}")
             return None
 
+        template = self.var_filename.get().strip()
+        error = validate_filename_template(template)
+        if error:
+            messagebox.showerror("檔名錯誤", error)
+            return None
+        # 固定檔名遇到多部影片會一路覆蓋，只留下最後一部
+        if not has_template_field(template):
+            if not messagebox.askokcancel(
+                "檔名沒有變數",
+                f"「{template}」是固定檔名，一次下載多部影片時會互相覆蓋，"
+                "只會留下最後一部。\n\n"
+                "要避免的話可以加上 %(title)s 或 %(autonumber)s。\n\n仍要繼續嗎？",
+            ):
+                return None
+
         dl = DownloadSettings(
             urls=urls,
             output_dir=outdir,
             use_cookies=self.var_cookies.get(),
             browser=self.var_browser.get(),
+            filename_template=template,
+            container=VIDEO_FORMATS[self.var_container.get()],
         )
 
         try:
@@ -686,6 +737,7 @@ class App:
 
         ok_count = 0
         fail_count = 0
+        numbering = 1  # %(autonumber)s 要跨網址接續，不能每個網址從 1 重來
 
         try:
             for index, url in enumerate(dl.urls, start=1):
@@ -696,8 +748,11 @@ class App:
                 self._emit("overall", f"第 {index} / {total} 個網址")
                 log(f"[{index}/{total}] {url}", "ok")
 
-                downloader = Downloader(dl, log, progress, self.cancel_event)
+                downloader = Downloader(
+                    dl, log, progress, self.cancel_event, autonumber_start=numbering
+                )
                 files = downloader.run(url)
+                numbering += len(files)
                 if not files:
                     log("此網址沒有產生任何檔案。", "warn")
                     fail_count += 1

@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,32 @@ VERTICAL_FILLS: dict[str, str] = {
     "模糊背景（保留完整畫面）": "blur",
     "上下黑邊（保留完整畫面）": "black",
 }
+
+# 輸出容器。mkv 什麼編碼都裝得下，webm 只收 VP8/VP9/AV1 + Vorbis/Opus。
+VIDEO_FORMATS: dict[str, str] = {
+    "MP4（相容性最好）": "mp4",
+    "MKV（不轉檔，保留原始分軌）": "mkv",
+    "WebM（VP9 / Opus）": "webm",
+}
+
+# 各容器的分軌挑選條件：先挑原生就是該格式的分軌，避免多做一次轉檔，
+# 挑不到才退回「最佳畫質 + 交給 ffmpeg 轉」。
+FORMAT_SELECTORS: dict[str, str] = {
+    "mp4": "bestvideo*[ext=mp4]+bestaudio[ext=m4a]/bestvideo*+bestaudio/best",
+    "mkv": "bestvideo*+bestaudio/best",
+    "webm": "bestvideo*[ext=webm]+bestaudio[ext=webm]/bestvideo*+bestaudio/best",
+}
+
+# 後製一定要重新編碼，webm 裝不下 H.264，所以改寫成 mp4
+PROCESSABLE_SUFFIXES = (".mp4", ".mkv", ".mov")
+
+# Windows 檔名不允許的字元（也涵蓋路徑分隔符號）
+INVALID_FILENAME_CHARS = '\\/:*?"<>|'
+
+DEFAULT_FILENAME_TEMPLATE = "%(title)s"
+
+# yt-dlp 的樣板欄位，例如 %(title)s、%(upload_date>%Y-%m-%d)s、%(autonumber)03d
+_TEMPLATE_FIELD = re.compile(r"%\([^)]*\)[-#0 +]*\d*(?:\.\d+)?[diouxXeEfFgGcrsBjlqDSU]")
 
 # 硬體編碼器。auto 會依序挑第一個實際可用的，全都不行就退回 CPU。
 ENCODERS: dict[str, str] = {
@@ -124,6 +151,37 @@ class DownloadSettings:
     output_dir: Path = OUTPUT_DIR
     use_cookies: bool = False
     browser: str = "edge"
+    # yt-dlp 檔名樣板，不含副檔名
+    filename_template: str = DEFAULT_FILENAME_TEMPLATE
+    container: str = "mp4"  # mp4 / mkv / webm
+
+
+def validate_filename_template(template: str) -> str | None:
+    """檢查檔名樣板，回傳錯誤訊息，合法則回傳 None。
+
+    只擋「一定會讓 yt-dlp 寫檔失敗」的寫法：空字串、非法字元、
+    自己補副檔名。樣板欄位本身寫錯由 yt-dlp 自己報。
+    """
+    name = template.strip()
+    if not name:
+        return "檔名樣板不可留空。"
+
+    # %(title)s 這類欄位裡的字元不算，先把欄位挖掉再檢查字面文字
+    literal = _TEMPLATE_FIELD.sub("", name)
+    bad = sorted({c for c in literal if c in INVALID_FILENAME_CHARS})
+    if bad:
+        return f"檔名不可含有 {' '.join(bad)} 這些字元。"
+    if literal.lower().endswith((".mp4", ".mkv", ".webm")):
+        return "檔名樣板不用自己加副檔名，程式會依所選格式補上。"
+    # 落單的 % 會讓 yt-dlp 解析樣板時直接丟例外（%% 才是字面上的百分號）
+    if "%" in literal.replace("%%", ""):
+        return "單獨的 % 是樣板語法的開頭；要顯示百分號請打兩個 %%。"
+    return None
+
+
+def has_template_field(template: str) -> bool:
+    """樣板裡有沒有 yt-dlp 欄位；沒有的話多部影片會撞名。"""
+    return bool(_TEMPLATE_FIELD.search(template))
 
 
 def _fallback_dirs() -> list[Path]:

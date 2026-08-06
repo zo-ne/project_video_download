@@ -13,8 +13,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import ClipSettings  # noqa: E402
-from processor import build_filter, build_video_args, validate  # noqa: E402
+from config import (  # noqa: E402
+    FORMAT_SELECTORS,
+    ClipSettings,
+    has_template_field,
+    validate_filename_template,
+)
+from processor import (  # noqa: E402
+    build_filter,
+    build_video_args,
+    output_suffix,
+    validate,
+)
 
 RATIO_916 = "9:16 (Shorts / Reels / TikTok)"
 RATIO_11 = "1:1 (正方形)"
@@ -257,6 +267,82 @@ def test_uses_region_is_true_for_blur_and_delogo_only():
     assert ClipSettings(mode="blur").uses_region is True
     assert ClipSettings(mode="delogo").uses_region is True
     assert ClipSettings(mode="crop").uses_region is False
+
+
+# ---------- 檔名樣板 ----------
+
+@pytest.mark.parametrize("template", [
+    "%(title)s",
+    "%(uploader)s - %(title)s",
+    "%(upload_date)s_%(id)s",
+    "我的影片 %(autonumber)03d",
+    "%(title).60s",
+    "固定檔名",
+])
+def test_valid_templates_pass(template):
+    assert validate_filename_template(template) is None
+
+
+def test_empty_template_is_rejected():
+    assert validate_filename_template("   ") is not None
+
+
+@pytest.mark.parametrize("template", [
+    "影片/%(title)s",       # 路徑分隔符號會跑到別的資料夾
+    "C:\\out\\%(title)s",
+    "%(title)s?",
+    "a<b>c",
+])
+def test_templates_with_illegal_chars_are_rejected(template):
+    assert validate_filename_template(template) is not None
+
+
+def test_field_syntax_is_not_mistaken_for_illegal_chars():
+    """欄位裡的冒號等字元是樣板語法，不該被當成非法檔名字元。"""
+    assert validate_filename_template("%(upload_date>%Y:%m:%d)s") is None
+
+
+def test_stray_percent_is_rejected():
+    """落單的 % 會讓 yt-dlp 解析樣板時直接丟例外，先擋下來。"""
+    assert validate_filename_template("100% 純手工") is not None
+    assert validate_filename_template("100%% 純手工") is None
+
+
+def test_template_with_extension_is_rejected():
+    error = validate_filename_template("%(title)s.mp4")
+    assert error and "副檔名" in error
+
+
+def test_has_template_field_detects_fixed_names():
+    assert has_template_field("%(title)s") is True
+    assert has_template_field("第 %(autonumber)03d 集") is True
+    assert has_template_field("固定檔名") is False
+    assert has_template_field("100% 純手工") is False
+
+
+# ---------- 容器格式 ----------
+
+def test_every_format_has_a_selector():
+    for container in ("mp4", "mkv", "webm"):
+        assert FORMAT_SELECTORS[container]
+
+
+def test_selectors_all_have_a_fallback_branch():
+    """挑不到指定格式的分軌時要能退回最佳畫質，不然乾脆下載失敗。"""
+    for selector in FORMAT_SELECTORS.values():
+        assert selector.endswith("/best")
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("a.mp4", ".mp4"),
+    ("a.mkv", ".mkv"),
+    ("a.MKV", ".mkv"),
+    ("a.mov", ".mov"),
+    ("a.webm", ".mp4"),   # webm 裝不下 H.264
+    ("a.flv", ".mp4"),
+])
+def test_output_suffix_avoids_incompatible_containers(name, expected):
+    assert output_suffix(Path(name)) == expected
 
 
 # ---------- build_video_args ----------
