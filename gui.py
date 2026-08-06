@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from tkinter import BooleanVar, IntVar, StringVar, Tk, filedialog, messagebox
+from tkinter import BooleanVar, Canvas, IntVar, StringVar, Tk, filedialog, messagebox
 from tkinter import scrolledtext, ttk
 
 import processor
@@ -55,8 +55,9 @@ class App:
     def __init__(self, root: Tk) -> None:
         self.root = root
         self.root.title(f"{APP_NAME} v{APP_VERSION}")
-        self.root.geometry("860x760")
-        self.root.minsize(760, 640)
+        self.root.geometry("880x820")
+        # 設定區會自己捲動，所以最小高度只要放得下控制列與一小塊日誌
+        self.root.minsize(720, 420)
 
         self.events: queue.Queue = queue.Queue()
         self.cancel_event = threading.Event()
@@ -181,11 +182,77 @@ class App:
         outer = ttk.Frame(self.root, padding=12)
         outer.pack(fill="both", expand=True)
 
-        self._build_url_section(outer)
-        self._build_options_section(outer)
-        self._build_output_section(outer)
-        self._build_control_section(outer)
-        self._build_log_section(outer)
+        # 開始／停止與進度條固定在底部，視窗再矮也不會被擠掉或捲走
+        bottom = ttk.Frame(outer)
+        bottom.pack(side="bottom", fill="x", pady=(8, 0))
+        self._build_control_section(bottom)
+
+        # 設定區與日誌各佔一格，中間的分隔線可以拖；
+        # 設定區塞不下時自己捲動，不會再去吃日誌的高度
+        self.paned = ttk.Panedwindow(outer, orient="vertical")
+        self.paned.pack(fill="both", expand=True)
+
+        settings = self._build_scrollable_pane()
+        self._build_url_section(settings)
+        self._build_options_section(settings)
+        self._build_output_section(settings)
+
+        log_pane = ttk.Frame(self.paned)
+        self.paned.add(log_pane, weight=1)
+        self._build_log_section(log_pane)
+
+        self.root.after(50, self._init_sash)
+
+    def _build_scrollable_pane(self) -> ttk.Frame:
+        """建立可垂直捲動的設定區，回傳要放內容的內層 Frame。"""
+        pane = ttk.Frame(self.paned)
+        self.paned.add(pane, weight=3)
+
+        self.canvas = Canvas(pane, highlightthickness=0, borderwidth=0, height=200)
+        self.vbar = ttk.Scrollbar(pane, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        inner = ttk.Frame(self.canvas)
+        self._scroll_window = self.canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        inner.bind("<Configure>", self._on_scroll_content_resize)
+        # 內層寬度跟著畫布走，否則會固定在 reqwidth，右邊留一塊空白
+        self.canvas.bind(
+            "<Configure>",
+            lambda e: self.canvas.itemconfigure(self._scroll_window, width=e.width),
+        )
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel)
+        return inner
+
+    def _on_scroll_content_resize(self, _event) -> None:
+        box = self.canvas.bbox("all")
+        if not box:
+            return
+        self.canvas.configure(scrollregion=box)
+        # 內容放得下就不要一直掛著一條沒作用的捲軸
+        needed = box[3] > self.canvas.winfo_height()
+        if needed and not self.vbar.winfo_ismapped():
+            self.vbar.pack(side="right", fill="y")
+        elif not needed and self.vbar.winfo_ismapped():
+            self.vbar.pack_forget()
+
+    def _on_mousewheel(self, event) -> None:
+        """滾輪只捲設定區；游標在日誌或網址欄上時交還給那個欄位自己捲。"""
+        widget = self.root.winfo_containing(event.x_root, event.y_root)
+        while widget is not None:
+            if widget is self.canvas:
+                self.canvas.yview_scroll(-event.delta // 120, "units")
+                return
+            if widget in (self.txt_log, self.txt_urls):
+                return
+            widget = getattr(widget, "master", None)
+
+    def _init_sash(self) -> None:
+        """開窗時先讓日誌拿到一塊固定高度，剩下的給設定區。"""
+        height = self.paned.winfo_height()
+        if height > 1:
+            self.paned.sashpos(0, max(120, height - 230))
 
     def _build_url_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text=" 影片網址 ", padding=8)
@@ -341,7 +408,9 @@ class App:
         )
         self.spin_vblur.pack(side="left")
 
-        self.lbl_vertical_hint = ttk.Label(frame, text="", foreground="#666")
+        self.lbl_vertical_hint = ttk.Label(
+            frame, text="", foreground="#666", wraplength=660, justify="left"
+        )
         self.lbl_vertical_hint.pack(anchor="w", pady=(4, 0))
 
         ttk.Separator(frame, orient="horizontal").pack(fill="x", pady=8)
@@ -406,6 +475,8 @@ class App:
             text="可用 %(title)s 標題、%(id)s 影片 ID、%(uploader)s 頻道、"
                  "%(upload_date)s 上傳日期、%(autonumber)s 流水號；副檔名會自動補。",
             foreground="#666",
+            wraplength=660,
+            justify="left",
         ).pack(anchor="w", pady=(2, 0))
 
     def _build_control_section(self, parent: ttk.Frame) -> None:
@@ -446,9 +517,9 @@ class App:
 
     def _build_log_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text=" 日誌 ", padding=6)
-        frame.pack(fill="both", expand=True, pady=(10, 0))
+        frame.pack(fill="both", expand=True, pady=(6, 0))
         self.txt_log = scrolledtext.ScrolledText(
-            frame, height=14, wrap="word", state="disabled", font=("Consolas", 9)
+            frame, height=8, wrap="word", state="disabled", font=("Consolas", 9)
         )
         self.txt_log.pack(fill="both", expand=True)
         for level, color in LOG_COLORS.items():
