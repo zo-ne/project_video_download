@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from tkinter import BooleanVar, Canvas, IntVar, StringVar, Tk, filedialog, messagebox
+from tkinter import BooleanVar, IntVar, StringVar, Tk, filedialog, messagebox
 from tkinter import scrolledtext, ttk
 
 import processor
@@ -55,9 +55,7 @@ class App:
     def __init__(self, root: Tk) -> None:
         self.root = root
         self.root.title(f"{APP_NAME} v{APP_VERSION}")
-        self.root.geometry("880x820")
-        # 設定區會自己捲動，所以最小高度只要放得下控制列與一小塊日誌
-        self.root.minsize(720, 420)
+        # 實際尺寸在 _lock_minimum_size 依內容量出來後才決定
 
         self.events: queue.Queue = queue.Queue()
         self.cancel_event = threading.Event()
@@ -182,77 +180,36 @@ class App:
         outer = ttk.Frame(self.root, padding=12)
         outer.pack(fill="both", expand=True)
 
-        # 開始／停止與進度條固定在底部，視窗再矮也不會被擠掉或捲走
+        # 開始／停止與進度條固定在底部，設定區攤在上面，中間剩下的都給日誌。
+        # 設定區不捲動，所以視窗的最小高度必須容得下它——由 _lock_minimum_size
+        # 依實際需求算出來，不寫死。
         bottom = ttk.Frame(outer)
         bottom.pack(side="bottom", fill="x", pady=(8, 0))
         self._build_control_section(bottom)
 
-        # 設定區與日誌各佔一格，中間的分隔線可以拖；
-        # 設定區塞不下時自己捲動，不會再去吃日誌的高度
-        self.paned = ttk.Panedwindow(outer, orient="vertical")
-        self.paned.pack(fill="both", expand=True)
-
-        settings = self._build_scrollable_pane()
+        settings = ttk.Frame(outer)
+        settings.pack(side="top", fill="x")
         self._build_url_section(settings)
         self._build_options_section(settings)
         self._build_output_section(settings)
 
-        log_pane = ttk.Frame(self.paned)
-        self.paned.add(log_pane, weight=1)
-        self._build_log_section(log_pane)
+        self._build_log_section(outer)
 
-        self.root.after(50, self._init_sash)
+        self.root.after(0, self._lock_minimum_size)
 
-    def _build_scrollable_pane(self) -> ttk.Frame:
-        """建立可垂直捲動的設定區，回傳要放內容的內層 Frame。"""
-        pane = ttk.Frame(self.paned)
-        self.paned.add(pane, weight=3)
+    def _lock_minimum_size(self) -> None:
+        """把視窗最小尺寸鎖在「設定區全部看得到」的高度。
 
-        self.canvas = Canvas(pane, highlightthickness=0, borderwidth=0, height=200)
-        self.vbar = ttk.Scrollbar(pane, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=self.vbar.set)
-        self.canvas.pack(side="left", fill="both", expand=True)
-
-        inner = ttk.Frame(self.canvas)
-        self._scroll_window = self.canvas.create_window((0, 0), window=inner, anchor="nw")
-
-        inner.bind("<Configure>", self._on_scroll_content_resize)
-        # 內層寬度跟著畫布走，否則會固定在 reqwidth，右邊留一塊空白
-        self.canvas.bind(
-            "<Configure>",
-            lambda e: self.canvas.itemconfigure(self._scroll_window, width=e.width),
-        )
-        self.root.bind_all("<MouseWheel>", self._on_mousewheel)
-        return inner
-
-    def _on_scroll_content_resize(self, _event) -> None:
-        box = self.canvas.bbox("all")
-        if not box:
-            return
-        self.canvas.configure(scrollregion=box)
-        # 內容放得下就不要一直掛著一條沒作用的捲軸
-        needed = box[3] > self.canvas.winfo_height()
-        if needed and not self.vbar.winfo_ismapped():
-            self.vbar.pack(side="right", fill="y")
-        elif not needed and self.vbar.winfo_ismapped():
-            self.vbar.pack_forget()
-
-    def _on_mousewheel(self, event) -> None:
-        """滾輪只捲設定區；游標在日誌或網址欄上時交還給那個欄位自己捲。"""
-        widget = self.root.winfo_containing(event.x_root, event.y_root)
-        while widget is not None:
-            if widget is self.canvas:
-                self.canvas.yview_scroll(-event.delta // 120, "units")
-                return
-            if widget in (self.txt_log, self.txt_urls):
-                return
-            widget = getattr(widget, "master", None)
-
-    def _init_sash(self) -> None:
-        """開窗時先讓日誌拿到一塊固定高度，剩下的給設定區。"""
-        height = self.paned.winfo_height()
-        if height > 1:
-            self.paned.sashpos(0, max(120, height - 230))
+        直接量實際需求而不是寫死數字，換字型或 DPI 縮放時才不會又被切掉。
+        """
+        self.root.update_idletasks()
+        need_h = self.root.winfo_reqheight()
+        need_w = self.root.winfo_reqwidth()
+        # 螢幕太矮就以螢幕為準，至少不要開出一個拉不回來的視窗
+        limit = self.root.winfo_screenheight() - 80
+        self.root.minsize(need_w, min(need_h, limit))
+        # 多給的高度全部落到日誌上（它是唯一會伸縮的區塊）
+        self.root.geometry(f"{max(need_w, 880)}x{min(need_h + 60, limit)}")
 
     def _build_url_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text=" 影片網址 ", padding=8)
@@ -264,7 +221,7 @@ class App:
             foreground="#666",
         ).pack(anchor="w", pady=(0, 4))
 
-        self.txt_urls = scrolledtext.ScrolledText(frame, height=5, wrap="none", font=("Consolas", 10))
+        self.txt_urls = scrolledtext.ScrolledText(frame, height=4, wrap="none", font=("Consolas", 10))
         self.txt_urls.pack(fill="x")
         # Ctrl+D 刪掉游標所在（或選取範圍內）的網址
         self.txt_urls.bind("<Control-d>", self._on_delete_selected_urls)
@@ -284,7 +241,7 @@ class App:
 
     def _build_options_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text=" 選項 ", padding=8)
-        frame.pack(fill="x", pady=(10, 0))
+        frame.pack(fill="x", pady=(8, 0))
 
         # --- Cookie ---
         row = ttk.Frame(frame)
@@ -301,7 +258,7 @@ class App:
         )
         self.cmb_browser.pack(side="left", padx=(8, 0))
 
-        ttk.Separator(frame, orient="horizontal").pack(fill="x", pady=8)
+        ttk.Separator(frame, orient="horizontal").pack(fill="x", pady=6)
 
         # --- 剪輯開關 ---
         row = ttk.Frame(frame)
@@ -365,7 +322,7 @@ class App:
         )
         self.spin_strength.pack(side="left")
 
-        ttk.Separator(frame, orient="horizontal").pack(fill="x", pady=8)
+        ttk.Separator(frame, orient="horizontal").pack(fill="x", pady=6)
 
         # --- 直式短影音裁切（獨立於去水印，可疊加） ---
         row = ttk.Frame(frame)
@@ -413,7 +370,7 @@ class App:
         )
         self.lbl_vertical_hint.pack(anchor="w", pady=(4, 0))
 
-        ttk.Separator(frame, orient="horizontal").pack(fill="x", pady=8)
+        ttk.Separator(frame, orient="horizontal").pack(fill="x", pady=6)
 
         # --- 編碼設定 ---
         row = ttk.Frame(frame)
@@ -445,7 +402,7 @@ class App:
 
     def _build_output_section(self, parent: ttk.Frame) -> None:
         frame = ttk.Frame(parent)
-        frame.pack(fill="x", pady=(10, 0))
+        frame.pack(fill="x", pady=(8, 0))
         ttk.Label(frame, text="輸出資料夾：").pack(side="left")
         ttk.Entry(frame, textvariable=self.var_outdir).pack(
             side="left", fill="x", expand=True, padx=(0, 6)
