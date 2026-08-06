@@ -24,6 +24,7 @@ from config import (
     OUTPUT_DIR,
     SUPPORTED_BROWSERS,
     VERTICAL_ANCHORS,
+    VERTICAL_FILLS,
     VERTICAL_RATIOS,
     available_encoders,
     find_ffmpeg,
@@ -31,6 +32,12 @@ from config import (
     save_settings,
 )
 from downloader import Downloader
+
+VERTICAL_HINTS = {
+    "crop": "裁掉左右兩側填滿畫面；來源本來就是直式（比目標更窄）時會原樣輸出。",
+    "blur": "完整畫面置中，上下用同一畫面放大後的高斯模糊補滿。",
+    "black": "完整畫面置中，上下補黑色。",
+}
 
 LOG_COLORS = {
     "info": "#1a1a1a",
@@ -73,6 +80,8 @@ class App:
         self.var_vertical = BooleanVar(value=False)
         self.var_vertical_ratio = StringVar(value=next(iter(VERTICAL_RATIOS)))
         self.var_vertical_anchor = StringVar(value=next(iter(VERTICAL_ANCHORS)))
+        self.var_vertical_fill = StringVar(value=next(iter(VERTICAL_FILLS)))
+        self.var_vertical_blur = IntVar(value=20)
 
         self.var_crop_top = IntVar(value=80)
         self.var_crop_bottom = IntVar(value=0)
@@ -107,6 +116,8 @@ class App:
             "vertical": self.var_vertical,
             "vertical_ratio": self.var_vertical_ratio,
             "vertical_anchor": self.var_vertical_anchor,
+            "vertical_fill": self.var_vertical_fill,
+            "vertical_blur": self.var_vertical_blur,
             "crop_top": self.var_crop_top,
             "crop_bottom": self.var_crop_bottom,
             "crop_left": self.var_crop_left,
@@ -129,6 +140,7 @@ class App:
             "mode": ["crop", "blur", "delogo"],
             "vertical_ratio": list(VERTICAL_RATIOS),
             "vertical_anchor": list(VERTICAL_ANCHORS),
+            "vertical_fill": list(VERTICAL_FILLS),
             "encoder": list(ENCODERS),
         }
         for key, var in self._setting_vars().items():
@@ -303,11 +315,25 @@ class App:
         )
         self.cmb_anchor.pack(side="left")
 
-        ttk.Label(
-            frame,
-            text="來源本來就是直式（比目標更窄）時會原樣輸出，不會二次裁切。",
-            foreground="#666",
-        ).pack(anchor="w", pady=(4, 0))
+        row = ttk.Frame(frame)
+        row.pack(fill="x", pady=(6, 0))
+        ttk.Label(row, text="填滿方式").pack(side="left", padx=(0, 4))
+        self.cmb_fill = ttk.Combobox(
+            row, textvariable=self.var_vertical_fill, values=list(VERTICAL_FILLS),
+            state="readonly", width=28,
+        )
+        self.cmb_fill.pack(side="left")
+        self.cmb_fill.bind("<<ComboboxSelected>>", lambda _e: self._sync_option_state())
+
+        self.lbl_vblur = ttk.Label(row, text="模糊強度")
+        self.lbl_vblur.pack(side="left", padx=(12, 4))
+        self.spin_vblur = ttk.Spinbox(
+            row, from_=1, to=200, textvariable=self.var_vertical_blur, width=6
+        )
+        self.spin_vblur.pack(side="left")
+
+        self.lbl_vertical_hint = ttk.Label(frame, text="", foreground="#666")
+        self.lbl_vertical_hint.pack(anchor="w", pady=(4, 0))
 
         ttk.Separator(frame, orient="horizontal").pack(fill="x", pady=8)
 
@@ -412,7 +438,16 @@ class App:
 
         state = "readonly" if vertical_on else "disabled"
         self.cmb_ratio.configure(state=state)
-        self.cmb_anchor.configure(state=state)
+        self.cmb_fill.configure(state=state)
+
+        fill = VERTICAL_FILLS.get(self.var_vertical_fill.get(), "crop")
+        # 補背景的兩種填法會保留完整畫面，沒有「要留哪一側」的問題
+        anchor_on = vertical_on and fill == "crop"
+        self.cmb_anchor.configure(state="readonly" if anchor_on else "disabled")
+        vblur_on = vertical_on and fill == "blur"
+        self.spin_vblur.configure(state="normal" if vblur_on else "disabled")
+        self.lbl_vblur.configure(foreground="#333" if vblur_on else "#aaa")
+        self.lbl_vertical_hint.configure(text=VERTICAL_HINTS.get(fill, ""))
 
         mode = self.var_mode.get()
         crop_on = clip_on and mode == "crop"
@@ -573,6 +608,8 @@ class App:
                 vertical=self.var_vertical.get(),
                 vertical_ratio=self.var_vertical_ratio.get(),
                 vertical_anchor=VERTICAL_ANCHORS[self.var_vertical_anchor.get()],
+                vertical_fill=VERTICAL_FILLS[self.var_vertical_fill.get()],
+                vertical_blur=self.var_vertical_blur.get(),
                 keep_original=self.var_keep_original.get(),
                 encoder=ENCODERS[self.var_encoder.get()],
                 quality=self.var_quality.get(),

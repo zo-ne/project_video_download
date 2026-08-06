@@ -65,15 +65,39 @@ def build_filter(s: ClipSettings) -> str:
 
     if s.vertical:
         ratio = VERTICAL_RATIOS.get(s.vertical_ratio, 9 / 16)
-        # 用 ffmpeg 運算式在執行期判斷：畫面比目標更寬才裁寬度，
-        # 本來就是直式（夠窄）的來源會原樣通過，不必先探測解析度。
-        width = f"trunc(if(gt(iw\\,ih*{ratio:.6f})\\,ih*{ratio:.6f}\\,iw)/2)*2"
-        anchor = {
-            "left": "0",
-            "right": "in_w-out_w",
-        }.get(s.vertical_anchor, "(in_w-out_w)/2")
+        r = f"{ratio:.6f}"
+        # 畫布 = 剛好裝得下整個來源、且符合目標比例的最小矩形。
+        # 全部用 ffmpeg 運算式在執行期算，不必先探測解析度。
+        # 取偶數時往上進位：畫布只要比來源小 1px，pad 就會直接報錯
+        canvas_w = f"ceil(max(iw\\,ih*{r})/2)*2"
+        canvas_h = f"ceil(max(ih\\,iw/{r})/2)*2"
         out = f"s{step}"
-        segments.append(f"[{label}]crop={width}:ih:{anchor}:0[{out}]")
+
+        if s.vertical_fill == "black":
+            segments.append(
+                f"[{label}]pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:black[{out}]"
+            )
+        elif s.vertical_fill == "blur":
+            # 背景：等比放大到蓋滿畫布再裁掉溢出的部分，然後高斯模糊。
+            # 放大後畫面比例不變，所以「畫布」在它眼中就是 min(iw, ih*r) x min(ih, iw/r)。
+            sigma = max(1, min(1024, s.vertical_blur))
+            base, tmp, bg = f"b{step}", f"t{step}", f"g{step}"
+            segments.append(
+                f"[{label}]split=2[{base}][{tmp}];"
+                f"[{tmp}]scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
+                f"crop=trunc(min(iw\\,ih*{r})/2)*2:trunc(min(ih\\,iw/{r})/2)*2,"
+                f"gblur=sigma={sigma}[{bg}];"
+                f"[{bg}][{base}]overlay=(W-w)/2:(H-h)/2[{out}]"
+            )
+        else:
+            # 裁切：只裁寬度，本來就是直式（夠窄）的來源會原樣通過
+            width = f"trunc(if(gt(iw\\,ih*{r})\\,ih*{r}\\,iw)/2)*2"
+            anchor = {
+                "left": "0",
+                "right": "in_w-out_w",
+            }.get(s.vertical_anchor, "(in_w-out_w)/2")
+            segments.append(f"[{label}]crop={width}:ih:{anchor}:0[{out}]")
+
         label, step = out, step + 1
 
     if not segments:

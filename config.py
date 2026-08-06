@@ -33,6 +33,13 @@ VERTICAL_ANCHORS: dict[str, str] = {
     "靠右": "right",
 }
 
+# 橫轉直的三種做法：裁掉兩側，或把完整畫面縮進去、上下用背景補滿
+VERTICAL_FILLS: dict[str, str] = {
+    "裁切兩側（畫面填滿，會切掉內容）": "crop",
+    "模糊背景（保留完整畫面）": "blur",
+    "上下黑邊（保留完整畫面）": "black",
+}
+
 # 硬體編碼器。auto 會依序挑第一個實際可用的，全都不行就退回 CPU。
 ENCODERS: dict[str, str] = {
     "自動（優先硬體加速）": "auto",
@@ -80,10 +87,12 @@ class ClipSettings:
     blur_h: int = 80
     blur_strength: int = 12  # 僅 blur 模式使用
 
-    # 直式短影音裁切：只裁寬度，畫面比目標更寬時才動作
+    # 直式短影音轉換
     vertical: bool = False
     vertical_ratio: str = "9:16"
-    vertical_anchor: str = "center"  # center / left / right
+    vertical_anchor: str = "center"  # center / left / right，只有 crop 填法用得到
+    vertical_fill: str = "crop"  # crop / blur / black
+    vertical_blur: int = 20  # blur 填法的高斯模糊 sigma
 
     keep_original: bool = True
 
@@ -95,6 +104,11 @@ class ClipSettings:
     def needs_processing(self) -> bool:
         """去水印與直式裁切各自獨立，任一開啟就要送進 FFmpeg。"""
         return self.enabled or self.vertical
+
+    @property
+    def vertical_pads(self) -> bool:
+        """填滿方式是補背景（保留完整畫面），而不是裁掉兩側。"""
+        return self.vertical and self.vertical_fill in ("blur", "black")
 
     @property
     def uses_region(self) -> bool:

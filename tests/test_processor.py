@@ -99,6 +99,75 @@ def test_vertical_anchor_positions(anchor, expected):
     assert expected in f
 
 
+def test_vertical_black_pads_instead_of_cropping():
+    """黑邊填法必須保留完整畫面，不能出現任何 crop。"""
+    f = build_filter(ClipSettings(
+        vertical=True, vertical_ratio=RATIO_916, vertical_fill="black",
+    ))
+    assert f.startswith("[0:v]pad=")
+    assert "crop" not in f
+    assert ":black[v]" in f
+    assert "(ow-iw)/2:(oh-ih)/2" in f
+
+
+def test_vertical_blur_builds_background_and_overlays_original():
+    f = build_filter(ClipSettings(
+        vertical=True, vertical_ratio=RATIO_916, vertical_fill="blur",
+        vertical_blur=25,
+    ))
+    assert "split=2" in f
+    assert "force_original_aspect_ratio=increase" in f
+    assert "gblur=sigma=25" in f
+    assert "overlay=(W-w)/2:(H-h)/2[v]" in f
+
+
+def test_vertical_blur_sigma_is_clamped():
+    assert "gblur=sigma=1" in build_filter(ClipSettings(
+        vertical=True, vertical_fill="blur", vertical_blur=0))
+    assert "gblur=sigma=1024" in build_filter(ClipSettings(
+        vertical=True, vertical_fill="blur", vertical_blur=99999))
+
+
+def test_pad_canvas_rounds_up_to_even():
+    """畫布比來源小 1px 的話 pad 會直接報錯，所以只能往上進位取偶數。"""
+    f = build_filter(ClipSettings(vertical=True, vertical_fill="black"))
+    assert f.count("ceil(") == 2
+    assert "trunc(" not in f
+
+
+def test_vertical_anchor_is_ignored_by_pad_fills():
+    """補背景的填法一律置中，取景設定不該滲進濾鏡。"""
+    for fill in ("black", "blur"):
+        f = build_filter(ClipSettings(
+            vertical=True, vertical_fill=fill, vertical_anchor="left",
+        ))
+        assert "in_w-out_w" not in f
+
+
+def test_unknown_fill_falls_back_to_crop():
+    f = build_filter(ClipSettings(vertical=True, vertical_fill="不存在的填法"))
+    assert f.startswith("[0:v]crop=")
+
+
+def test_pad_fills_chain_after_watermark_removal():
+    """去水印的輸出要接進直式轉換，最後仍然只有一個 [v]。"""
+    for fill in ("black", "blur"):
+        f = build_filter(ClipSettings(
+            enabled=True, mode="crop", crop_top=80,
+            vertical=True, vertical_fill=fill,
+        ))
+        assert "[s0]" in f
+        assert f.count("[v]") == 1
+        assert f.endswith("[v]")
+
+
+def test_vertical_pads_property():
+    assert ClipSettings(vertical=True, vertical_fill="blur").vertical_pads is True
+    assert ClipSettings(vertical=True, vertical_fill="black").vertical_pads is True
+    assert ClipSettings(vertical=True, vertical_fill="crop").vertical_pads is False
+    assert ClipSettings(vertical=False, vertical_fill="blur").vertical_pads is False
+
+
 def test_unknown_ratio_falls_back_to_916():
     """設定檔被人手改壞時不該炸掉，退回預設比例即可。"""
     f = build_filter(ClipSettings(vertical=True, vertical_ratio="不存在的比例"))
