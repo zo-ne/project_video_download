@@ -96,7 +96,7 @@ class Downloader:
             "progress_hooks": [self._progress_hook],
             "postprocessor_hooks": [self._postprocessor_hook],
             "logger": _YdlLogger(self.log),
-            # B 站分 P / YouTube 章節資訊保留在檔名之外，不額外寫檔
+            # 分 P／章節資訊保留在檔名之外，不額外寫檔
             "writethumbnail": False,
             "writesubtitles": False,
         }

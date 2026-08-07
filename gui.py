@@ -217,7 +217,7 @@ class App:
 
         ttk.Label(
             frame,
-            text="每行一個網址，支援 YouTube / Bilibili 單片與播放清單",
+            text="每行一個網址，支援單片與播放清單",
             foreground="#666",
         ).pack(anchor="w", pady=(0, 4))
 
